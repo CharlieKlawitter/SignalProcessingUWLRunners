@@ -1,0 +1,62 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# --- Read and clean data ---
+data = pd.read_excel("RightFootData.xlsx")
+data = data.apply(pd.to_numeric, errors='coerce')
+data = data.dropna(how='all')
+
+# --- Extract signal ---
+f = data.iloc[0:98, 48].values
+
+# --- Sampling parameters ---
+Fs = 100
+dt = 1 / Fs
+n = len(f)
+t = np.arange(n) * dt
+
+# --- Plot raw signal ---
+plt.figure(figsize=(12, 6))
+plt.plot(t, f)
+plt.title("Raw Signal")
+plt.xlabel("Time (s)")
+plt.ylabel("Amplitude")
+plt.show()
+
+# --- FFT ---
+fhat = np.fft.fft(f)
+freq = np.fft.fftfreq(n, d=dt)
+
+# --- Power Spectral Density ---
+PSD = np.abs(fhat)**2 / n
+
+# --- Plot PSD ---
+L = np.arange(1, n // 2)
+
+plt.figure(figsize=(12, 6))
+plt.plot(freq[L], PSD[L])
+plt.title("Power Spectral Density")
+plt.xlabel("Frequency (Hz)")
+plt.ylabel("Power")
+plt.show()
+
+# --- Filter using cutoff ---
+cutoff = 3
+low_mask = np.abs(freq) <= cutoff
+high_mask = ~low_mask
+
+# --- Decompose ---
+f_low = np.fft.ifft(fhat * low_mask).real
+f_high = np.fft.ifft(fhat * high_mask).real
+
+# --- Plot decomposition ---
+plt.figure(figsize=(10, 5))
+plt.plot(t, f, label='Original', linewidth=1)
+plt.plot(t, f_low, label='Low Frequency (<3 Hz)', linewidth=2)
+plt.plot(t, f_high, label='High Frequency (>3 Hz)', linewidth=2)
+plt.xlabel('Time (s)')
+plt.ylabel('Amplitude')
+plt.title('Signal Decomposition (Cutoff = 3 Hz)')
+plt.legend()
+plt.show()
