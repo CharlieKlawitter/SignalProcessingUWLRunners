@@ -1,0 +1,246 @@
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt
+from scipy.stats import ttest_ind
+
+
+# =====================================================
+# 1. LOAD FFT DATA
+# =====================================================
+fft_data = pd.read_excel("RightFootData.xlsx", header=1)
+
+# Ensure numeric
+fft_data = fft_data.apply(pd.to_numeric, errors='coerce')
+
+
+# =====================================================
+# 2. LOAD INJURY DATA
+# =====================================================
+injury_info = pd.read_excel("Injuries.xlsx")
+injury_col = "Previous Injury (2=No; 1=Yes)"
+
+
+def clean_id(x):
+    return str(x).strip().upper().replace("\xa0", "").replace(" ", "")
+
+injury_info["Subject (Initials)"] = injury_info["Subject (Initials)"].apply(clean_id)
+
+
+# =====================================================
+# 3. ALIGN SUBJECTS TO FFT COLUMNS (CRITICAL FIX)
+# =====================================================
+n_cols = fft_data.shape[1]
+n_subjects = len(injury_info)
+
+print("FFT columns:", n_cols)
+print("Subjects:", n_subjects)
+
+# Use overlap safely
+min_n = min(n_cols, n_subjects)
+
+fft_data = fft_data.iloc[:, :min_n]
+subjects = injury_info["Subject (Initials)"].values[:min_n]
+
+fft_data.columns = [clean_id(s) for s in subjects]
+
+
+# =====================================================
+# 4. PARAMETERS
+# =====================================================
+Fs = 100
+dt = 1 / Fs
+cutoff = 3
+
+
+# =====================================================
+# 5. FILTER
+# =====================================================
+def safe_lowpass_filter(signal, Fs, cutoff):
+    signal = np.asarray(signal, dtype=float)
+    signal = signal[~np.isnan(signal)]
+
+    if len(signal) < 10:
+        return None
+
+    b, a = butter(4, cutoff / (Fs / 2), btype='low')
+    pad = min(20, len(signal) - 1)
+
+    try:
+        return filtfilt(b, a, signal, padlen=pad)
+    except:
+        return None
+
+
+# =====================================================
+# 6. FEATURE EXTRACTION
+# =====================================================
+def compute_all_metrics(signal):
+    signal = np.asarray(signal, dtype=float)
+    signal = signal[~np.isnan(signal)]
+
+    if len(signal) < 10:
+        return {k: np.nan for k in [
+            "Impact Peak Force",
+            "Time to Impact Peak (ms)",
+            "Instantaneous Loading Rate",
+            "Average Loading Rate",
+            "Weighted Mean Frequency",
+            "Peak Power Frequency",
+            "Power Sum",
+            "Active Peak Force",
+            "Time to Active Peak (ms)"
+        ]}
+
+    n = len(signal)
+
+    # ACTIVE
+    low = safe_lowpass_filter(signal, Fs, cutoff)
+
+    if low is None:
+        active_peak_force = np.nan
+        time_to_active_peak = np.nan
+    else:
+        active_peak_force = np.max(low)
+        time_to_active_peak = np.argmax(low) * dt * 1000
+
+    # IMPACT
+    early_window = max(int(0.2 * n), 2)
+    early = signal[:early_window]
+
+    impact_peak_force = np.max(early)
+    impact_peak_index = np.argmax(early)
+    time_to_impact_peak = impact_peak_index * dt * 1000
+
+    slopes = np.diff(early) / dt
+    inst_loading_rate = np.max(slopes) if len(slopes) > 0 else np.nan
+    avg_loading_rate = impact_peak_force / (impact_peak_index * dt) if impact_peak_index > 1 else np.nan
+
+    # FFT
+    fhat = np.fft.fft(signal)
+    freq = np.fft.fftfreq(n, d=dt)
+
+    PSD = np.abs(fhat) ** 2 / n
+
+    mask = freq > 0
+    freq_half = freq[mask]
+    PSD_half = PSD[mask]
+
+    if np.sum(PSD_half) > 0:
+        weighted_mean_freq = np.sum(freq_half * PSD_half) / np.sum(PSD_half)
+        peak_power_freq = freq_half[np.argmax(PSD_half)]
+        power_sum = np.sum(PSD_half)
+    else:
+        weighted_mean_freq = np.nan
+        peak_power_freq = np.nan
+        power_sum = np.nan
+
+    return {
+        "Impact Peak Force": impact_peak_force,
+        "Time to Impact Peak (ms)": time_to_impact_peak,
+        "Instantaneous Loading Rate": inst_loading_rate,
+        "Average Loading Rate": avg_loading_rate,
+        "Weighted Mean Frequency": weighted_mean_freq,
+        "Peak Power Frequency": peak_power_freq,
+        "Power Sum": power_sum,
+        "Active Peak Force": active_peak_force,
+        "Time to Active Peak (ms)": time_to_active_peak
+    }
+
+
+# =====================================================
+# 7. COMPUTE SUBJECT METRICS
+# =====================================================
+all_stats = []
+
+for col in fft_data.columns:
+    signal = fft_data[col].values
+
+    stats = compute_all_metrics(signal)
+    stats["Participant"] = col
+
+    all_stats.append(stats)
+
+stats_df = pd.DataFrame(all_stats)
+
+
+# =====================================================
+# 8. MERGE WITH INJURY DATA
+# =====================================================
+merged = stats_df.merge(
+    injury_info,
+    left_on="Participant",
+    right_on="Subject (Initials)",
+    how="inner"
+)
+
+print("\nFinal merged shape:", merged.shape)
+
+injury_group = merged[merged[injury_col] == 1]
+control_group = merged[merged[injury_col] == 2]
+
+print("Injury:", len(injury_group))
+print("Control:", len(control_group))
+
+
+# =====================================================
+# 9. CORRELATION MATRIX
+# =====================================================
+metrics = [
+    "Impact Peak Force",
+    "Time to Impact Peak (ms)",
+    "Instantaneous Loading Rate",
+    "Average Loading Rate",
+    "Weighted Mean Frequency",
+    "Peak Power Frequency",
+    "Power Sum",
+    "Active Peak Force",
+    "Time to Active Peak (ms)"
+]
+
+corr_matrix = merged[metrics].corr()
+
+print("\nCorrelation matrix:")
+print(corr_matrix)
+
+
+
+# =====================================================
+# 11. GROUP COMPARISON (T-TESTS)
+# =====================================================
+results = []
+
+for m in metrics:
+    inj = injury_group[m].dropna()
+    con = control_group[m].dropna()
+
+    inj_mean, inj_sd = inj.mean(), inj.std()
+    con_mean, con_sd = con.mean(), con.std()
+
+    mean_diff = abs(inj_mean - con_mean)
+
+    if len(inj) > 1 and len(con) > 1:
+        t, p = ttest_ind(inj, con, equal_var=False)
+    else:
+        p = np.nan
+
+    results.append([
+        m,
+        f"{inj_mean:.3f} ± {inj_sd:.3f}",
+        f"{con_mean:.3f} ± {con_sd:.3f}",
+        f"{mean_diff:.3f}",
+        f"{p:.4f}" if not np.isnan(p) else "nan"
+    ])
+
+final_table = pd.DataFrame(
+    results,
+    columns=[
+        "Variable",
+        "Injury (n=85) (mean ± SD)",
+        "Control (n=36) (mean ± SD)",
+        "Mean Difference",
+        "p-value"
+    ]
+)
+
+print("\nFINAL TABLE:")
+print(final_table.to_string(index=False))
