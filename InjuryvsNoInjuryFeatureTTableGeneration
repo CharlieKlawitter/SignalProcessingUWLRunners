@@ -3,244 +3,232 @@ import pandas as pd
 from scipy.signal import butter, filtfilt
 from scipy.stats import ttest_ind
 
-
 # =====================================================
-# 1. LOAD FFT DATA
+# 1. LOAD DATA
 # =====================================================
-fft_data = pd.read_excel("RightFootData.xlsx", header=1)
-
-# Ensure numeric
-fft_data = fft_data.apply(pd.to_numeric, errors='coerce')
-
-
-# =====================================================
-# 2. LOAD INJURY DATA
-# =====================================================
+fft_data = pd.read_excel("RightFootData1.xlsx")
 injury_info = pd.read_excel("Injuries.xlsx")
+
 injury_col = "Previous Injury (2=No; 1=Yes)"
 
-
+# =====================================================
+# 2. CLEAN IDS
+# =====================================================
 def clean_id(x):
     return str(x).strip().upper().replace("\xa0", "").replace(" ", "")
 
+fft_data.columns = [clean_id(c) for c in fft_data.columns]
+
 injury_info["Subject (Initials)"] = injury_info["Subject (Initials)"].apply(clean_id)
-
+injury_info[injury_col] = pd.to_numeric(injury_info[injury_col], errors="coerce")
 
 # =====================================================
-# 3. ALIGN SUBJECTS TO FFT COLUMNS (CRITICAL FIX)
+# 3. MATCH SUBJECTS
 # =====================================================
-n_cols = fft_data.shape[1]
-n_subjects = len(injury_info)
+common = sorted(set(fft_data.columns).intersection(injury_info["Subject (Initials)"]))
 
-print("FFT columns:", n_cols)
-print("Subjects:", n_subjects)
+fft_data = fft_data[common]
+injury_info = injury_info.set_index("Subject (Initials)").loc[common].reset_index()
 
-# Use overlap safely
-min_n = min(n_cols, n_subjects)
-
-fft_data = fft_data.iloc[:, :min_n]
-subjects = injury_info["Subject (Initials)"].values[:min_n]
-
-fft_data.columns = [clean_id(s) for s in subjects]
-
+print("Matched subjects:", len(common))
 
 # =====================================================
 # 4. PARAMETERS
 # =====================================================
-Fs = 100
+Fs = 1800
 dt = 1 / Fs
-cutoff = 3
-
+cutoff = 10
 
 # =====================================================
 # 5. FILTER
 # =====================================================
-def safe_lowpass_filter(signal, Fs, cutoff):
-    signal = np.asarray(signal, dtype=float)
-    signal = signal[~np.isnan(signal)]
+def lowpass(x):
+    x = np.asarray(x, dtype=float)
+    x = x[~np.isnan(x)]
 
-    if len(signal) < 10:
+    if len(x) < 10:
         return None
 
-    b, a = butter(4, cutoff / (Fs / 2), btype='low')
-    pad = min(20, len(signal) - 1)
+    b, a = butter(4, cutoff / (Fs / 2), btype="low")
+    pad = min(20, len(x) - 1)
 
     try:
-        return filtfilt(b, a, signal, padlen=pad)
+        return filtfilt(b, a, x, padlen=pad)
     except:
         return None
 
-
 # =====================================================
-# 6. FEATURE EXTRACTION
+# 6. FEATURE EXTRACTION (FIXED)
 # =====================================================
-def compute_all_metrics(signal):
+def extract(signal):
     signal = np.asarray(signal, dtype=float)
     signal = signal[~np.isnan(signal)]
 
     if len(signal) < 10:
-        return {k: np.nan for k in [
-            "Impact Peak Force",
-            "Time to Impact Peak (ms)",
-            "Instantaneous Loading Rate",
-            "Average Loading Rate",
-            "Weighted Mean Frequency",
-            "Peak Power Frequency",
-            "Power Sum",
-            "Active Peak Force",
-            "Time to Active Peak (ms)"
-        ]}
+        return None
 
     n = len(signal)
 
-    # ACTIVE
-    low = safe_lowpass_filter(signal, Fs, cutoff)
+    # ---------------- NORMALIZATION ----------------
+    bw = np.max(signal)
+    if bw == 0:
+        return None
 
-    if low is None:
-        active_peak_force = np.nan
-        time_to_active_peak = np.nan
-    else:
-        active_peak_force = np.max(low)
-        time_to_active_peak = np.argmax(low) * dt * 1000
+    norm = signal / bw  # BW-normalized
 
-    # IMPACT
-    early_window = max(int(0.2 * n), 2)
-    early = signal[:early_window]
+    # =================================================
+    # IMPACT PHASE
+    # =================================================
+    early = norm[:max(int(0.15 * n), 2)]
 
-    impact_peak_force = np.max(early)
-    impact_peak_index = np.argmax(early)
-    time_to_impact_peak = impact_peak_index * dt * 1000
+    impact_peak = np.max(early)  # BW
+    impact_idx = np.argmax(early)
+    time_to_impact = impact_idx * dt * 1000  # ms
 
     slopes = np.diff(early) / dt
-    inst_loading_rate = np.max(slopes) if len(slopes) > 0 else np.nan
-    avg_loading_rate = impact_peak_force / (impact_peak_index * dt) if impact_peak_index > 1 else np.nan
+    inst_rfd = np.percentile(slopes, 95)  # BW/s
+    avg_rfd = impact_peak / ((impact_idx + 1) * dt)
 
-    # FFT
-    fhat = np.fft.fft(signal)
+    # =================================================
+    # ACTIVE PHASE
+    # =================================================
+    low = lowpass(signal)
+
+    if low is None:
+        active_peak = np.nan
+        t_active = np.nan
+    else:
+        active_peak = np.max(low) / bw   # FIXED (no double normalization)
+        t_active = np.argmax(low) * dt * 1000
+
+    # =================================================
+    # FFT FEATURES (FIXED)
+    # =================================================
+    fhat = np.fft.fft(norm)
     freq = np.fft.fftfreq(n, d=dt)
 
-    PSD = np.abs(fhat) ** 2 / n
+    PSD = (np.abs(fhat) ** 2) / n
+    PSD = PSD / np.sum(PSD)  # normalize energy
 
     mask = freq > 0
-    freq_half = freq[mask]
-    PSD_half = PSD[mask]
+    freq = freq[mask]
+    PSD = PSD[mask]
 
-    if np.sum(PSD_half) > 0:
-        weighted_mean_freq = np.sum(freq_half * PSD_half) / np.sum(PSD_half)
-        peak_power_freq = freq_half[np.argmax(PSD_half)]
-        power_sum = np.sum(PSD_half)
+    if np.sum(PSD) > 0:
+        # ✅ Spectral centroid (replaces unstable peak frequency)
+        spectral_centroid = np.sum(freq * PSD)
+
+        # ✅ Spectral entropy (VERY important for injury studies)
+        psd_norm = PSD / np.sum(PSD)
+        spectral_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-12))
+
+        power_sum = np.sum(PSD)
     else:
-        weighted_mean_freq = np.nan
-        peak_power_freq = np.nan
+        spectral_centroid = np.nan
+        spectral_entropy = np.nan
         power_sum = np.nan
 
     return {
-        "Impact Peak Force": impact_peak_force,
-        "Time to Impact Peak (ms)": time_to_impact_peak,
-        "Instantaneous Loading Rate": inst_loading_rate,
-        "Average Loading Rate": avg_loading_rate,
-        "Weighted Mean Frequency": weighted_mean_freq,
-        "Peak Power Frequency": peak_power_freq,
-        "Power Sum": power_sum,
-        "Active Peak Force": active_peak_force,
-        "Time to Active Peak (ms)": time_to_active_peak
+        "Impact Peak Force (BW)": impact_peak,
+        "Time to Impact Peak (ms)": time_to_impact,
+        "Instant Loading Rate (BW·s⁻¹)": inst_rfd,
+        "Avg Loading Rate (BW·s⁻¹)": avg_rfd,
+        "Spectral Centroid (Hz)": spectral_centroid,
+        "Spectral Entropy": spectral_entropy,
+        "Power Sum (norm)": power_sum,
+        "Active Peak Force (BW)": active_peak,
+        "Time to Active Peak (ms)": t_active
     }
 
-
 # =====================================================
-# 7. COMPUTE SUBJECT METRICS
+# 7. BUILD DATASET
 # =====================================================
-all_stats = []
+rows = []
 
 for col in fft_data.columns:
-    signal = fft_data[col].values
+    f = extract(fft_data[col].values)
+    if f is None:
+        continue
+    f["Participant"] = col
+    rows.append(f)
 
-    stats = compute_all_metrics(signal)
-    stats["Participant"] = col
-
-    all_stats.append(stats)
-
-stats_df = pd.DataFrame(all_stats)
-
+stats = pd.DataFrame(rows)
 
 # =====================================================
 # 8. MERGE WITH INJURY DATA
 # =====================================================
-merged = stats_df.merge(
+merged = stats.merge(
     injury_info,
     left_on="Participant",
     right_on="Subject (Initials)",
     how="inner"
 )
 
-print("\nFinal merged shape:", merged.shape)
-
-injury_group = merged[merged[injury_col] == 1]
-control_group = merged[merged[injury_col] == 2]
-
-print("Injury:", len(injury_group))
-print("Control:", len(control_group))
-
+inj = merged[merged[injury_col] == 1]
+con = merged[merged[injury_col] == 2]
 
 # =====================================================
-# 9. CORRELATION MATRIX
+# 9. FORMATTING
 # =====================================================
-metrics = [
-    "Impact Peak Force",
+def fmt(m, s):
+    return f"{m:.2f} ± {s:.2f}"
+
+def sig(p):
+    if np.isnan(p):
+        return "—"
+    if p < 0.001:
+        return "<0.001*"
+    elif p < 0.05:
+        return f"{p:.3f}*"
+    return f"{p:.3f}"
+
+# =====================================================
+# 10. GROUPS
+# =====================================================
+high_freq = [
+    "Impact Peak Force (BW)",
     "Time to Impact Peak (ms)",
-    "Instantaneous Loading Rate",
-    "Average Loading Rate",
-    "Weighted Mean Frequency",
-    "Peak Power Frequency",
-    "Power Sum",
-    "Active Peak Force",
+    "Instant Loading Rate (BW·s⁻¹)",
+    "Avg Loading Rate (BW·s⁻¹)",
+    "Spectral Centroid (Hz)",
+    "Spectral Entropy",
+    "Power Sum (norm)"
+]
+
+low_freq = [
+    "Active Peak Force (BW)",
     "Time to Active Peak (ms)"
 ]
 
-corr_matrix = merged[metrics].corr()
+def build(group):
+    table = []
 
-print("\nCorrelation matrix:")
-print(corr_matrix)
+    for m in group:
+        a = inj[m].dropna()
+        b = con[m].dropna()
 
+        if len(a) > 1 and len(b) > 1:
+            _, p = ttest_ind(a, b, equal_var=False)
+        else:
+            p = np.nan
 
+        table.append([
+            m,
+            fmt(a.mean(), a.std()),
+            fmt(b.mean(), b.std()),
+            f"{abs(a.mean() - b.mean()):.2f}",
+            sig(p)
+        ])
 
-# =====================================================
-# 11. GROUP COMPARISON (T-TESTS)
-# =====================================================
-results = []
-
-for m in metrics:
-    inj = injury_group[m].dropna()
-    con = control_group[m].dropna()
-
-    inj_mean, inj_sd = inj.mean(), inj.std()
-    con_mean, con_sd = con.mean(), con.std()
-
-    mean_diff = abs(inj_mean - con_mean)
-
-    if len(inj) > 1 and len(con) > 1:
-        t, p = ttest_ind(inj, con, equal_var=False)
-    else:
-        p = np.nan
-
-    results.append([
-        m,
-        f"{inj_mean:.3f} ± {inj_sd:.3f}",
-        f"{con_mean:.3f} ± {con_sd:.3f}",
-        f"{mean_diff:.3f}",
-        f"{p:.4f}" if not np.isnan(p) else "nan"
+    return pd.DataFrame(table, columns=[
+        "Variable", "Injury", "Control", "Diff", "p"
     ])
 
-final_table = pd.DataFrame(
-    results,
-    columns=[
-        "Variable",
-        "Injury (n=85) (mean ± SD)",
-        "Control (n=36) (mean ± SD)",
-        "Mean Difference",
-        "p-value"
-    ]
-)
+# =====================================================
+# 11. OUTPUT
+# =====================================================
+print("\nHIGH FREQUENCY SIGNAL\n")
+print(build(high_freq).to_string(index=False))
 
-print("\nFINAL TABLE:")
-print(final_table.to_string(index=False))
+print("\nLOW FREQUENCY SIGNAL\n")
+print(build(low_freq).to_string(index=False))
