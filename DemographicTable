@@ -3,7 +3,7 @@ import pandas as pd
 # =========================
 # LOAD DATA
 # =========================
-file_path = "DemographicData.xlsx"   # change path if needed
+file_path = "DemographicData.xlsx"
 df = pd.read_excel(file_path)
 
 # =========================
@@ -11,7 +11,6 @@ df = pd.read_excel(file_path)
 # =========================
 df = df.dropna(how='all')
 
-# Rename columns for convenience
 df = df.rename(columns={
     "Sex (1=F, 2=M)": "Sex",
     "Height (cm)": "Height",
@@ -19,54 +18,68 @@ df = df.rename(columns={
     "Previous Injury (2=No; 1=Yes)": "Injury"
 })
 
-# =========================
-# DEMOGRAPHIC CALCULATIONS
-# =========================
-n_total = len(df)
-
-# Sex counts
-n_female = (df["Sex"] == 1).sum()
-n_male = (df["Sex"] == 2).sum()
-
-# Injury counts
-n_injury = (df["Injury"] == 1).sum()
-n_no_injury = (df["Injury"] == 2).sum()
-
-# Means and standard deviations
-height_mean = df["Height"].mean()
-height_std = df["Height"].std()
-
-weight_mean = df["Weight"].mean()
-weight_std = df["Weight"].std()
+# Split groups
+injury_group = df[df["Injury"] == 1]
+no_injury_group = df[df["Injury"] == 2]
 
 # =========================
-# CREATE DEMOGRAPHIC TABLE
+# FUNCTION TO COMPUTE STATS
 # =========================
-summary = pd.DataFrame({
+def summarize(group):
+    n = len(group)
+    
+    n_female = (group["Sex"] == 1).sum()
+    n_male = (group["Sex"] == 2).sum()
+    
+    height_mean = group["Height"].mean()
+    height_std = group["Height"].std()
+    
+    weight_mean = group["Weight"].mean()
+    weight_std = group["Weight"].std()
+    
+    return {
+        "N": n,
+        "Female (n, %)": f"{n_female} ({100*n_female/n:.1f}%)" if n > 0 else "0",
+        "Male (n, %)": f"{n_male} ({100*n_male/n:.1f}%)" if n > 0 else "0",
+        "Height (cm)": f"{height_mean:.2f} ± {height_std:.2f}" if n > 0 else "0",
+        "Weight (kg)": f"{weight_mean:.2f} ± {weight_std:.2f}" if n > 0 else "0"
+    }
+
+# Compute summaries
+injury_stats = summarize(injury_group)
+no_injury_stats = summarize(no_injury_group)
+
+# =========================
+# CREATE TABLE
+# =========================
+table = pd.DataFrame({
     "Variable": [
         "Total Subjects",
         "Female (n, %)",
         "Male (n, %)",
         "Height (cm, mean ± SD)",
-        "Weight (kg, mean ± SD)",
-        "Previous Injury (n, %)",
-        "No Injury (n, %)"
+        "Weight (kg, mean ± SD)"
     ],
-    "Value": [
-        n_total,
-        f"{n_female} ({100*n_female/n_total:.1f}%)",
-        f"{n_male} ({100*n_male/n_total:.1f}%)",
-        f"{height_mean:.2f} ± {height_std:.2f}",
-        f"{weight_mean:.2f} ± {weight_std:.2f}",
-        f"{n_injury} ({100*n_injury/n_total:.1f}%)",
-        f"{n_no_injury} ({100*n_no_injury/n_total:.1f}%)"
+    "Injury": [
+        injury_stats["N"],
+        injury_stats["Female (n, %)"],
+        injury_stats["Male (n, %)"],
+        injury_stats["Height (cm)"],
+        injury_stats["Weight (kg)"]
+    ],
+    "No Injury": [
+        no_injury_stats["N"],
+        no_injury_stats["Female (n, %)"],
+        no_injury_stats["Male (n, %)"],
+        no_injury_stats["Height (cm)"],
+        no_injury_stats["Weight (kg)"]
     ]
 })
 
 # =========================
 # OUTPUT
 # =========================
-print(summary)
+print(table)
 
-# Optional: save to CSV
-summary.to_csv("demographic_summary.csv", index=False)
+# Save to CSV
+table.to_csv("demographics_by_injury.csv", index=False)
