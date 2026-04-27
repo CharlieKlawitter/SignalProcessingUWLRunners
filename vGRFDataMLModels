@@ -1,7 +1,3 @@
-# =====================================================
-# IMPORTS
-# =====================================================
-
 import numpy as np
 import pandas as pd
 
@@ -19,7 +15,7 @@ import matplotlib.pyplot as plt
 
 
 # =====================================================
-# 1. LOAD DATA
+# LOAD DATA
 # =====================================================
 
 fft_data = pd.read_excel("RightFootData1.xlsx")
@@ -28,12 +24,9 @@ injury_info = pd.read_excel("Injuries.xlsx")
 injury_col = "Previous Injury (2=No; 1=Yes)"
 
 
-# =====================================================
-# 2. CLEAN IDS
-# =====================================================
-
 def clean_id(x):
     return str(x).strip().upper().replace("\xa0", "").replace(" ", "")
+
 
 fft_data.columns = [clean_id(c) for c in fft_data.columns]
 
@@ -42,7 +35,7 @@ injury_info[injury_col] = pd.to_numeric(injury_info[injury_col], errors="coerce"
 
 
 # =====================================================
-# 3. MATCH SUBJECTS
+# MATCH SUBJECTS
 # =====================================================
 
 common = sorted(set(fft_data.columns).intersection(injury_info["Subject (Initials)"]))
@@ -54,7 +47,7 @@ print("Matched subjects:", len(common))
 
 
 # =====================================================
-# 4. PARAMETERS
+# PARAMETERS
 # =====================================================
 
 Fs = 1800
@@ -63,7 +56,7 @@ cutoff = 10
 
 
 # =====================================================
-# 5. FILTER
+# FILTER
 # =====================================================
 
 def lowpass(x):
@@ -83,13 +76,14 @@ def lowpass(x):
 
 
 # =====================================================
-# 6. FEATURE EXTRACTION (ACTIVE PEAK TIME REMOVED)
+# FEATURE EXTRACTION (FIXED)
 # =====================================================
 
 def extract(signal):
 
     signal = np.asarray(signal, dtype=float)
     signal = signal[~np.isnan(signal)]
+    signal = np.trim_zeros(signal)
 
     if len(signal) < 10:
         return None
@@ -118,46 +112,48 @@ def extract(signal):
 
     if low is None:
         active_peak = np.nan
+        time_to_active_peak = np.nan
     else:
         active_peak = np.max(low) / bw
+        active_idx = np.argmax(low)
+        time_to_active_peak = active_idx * dt * 1000
 
     # ---------------- FFT ----------------
     fhat = np.fft.fft(norm)
     freq = np.fft.fftfreq(n, d=dt)
 
     PSD = (np.abs(fhat) ** 2) / n
-    PSD = PSD / np.sum(PSD)
 
     mask = freq > 0
     freq = freq[mask]
     PSD = PSD[mask]
 
     if np.sum(PSD) > 0:
-        spectral_centroid = np.sum(freq * PSD)
+        PSD_norm = PSD / np.sum(PSD)
 
-        psd_norm = PSD / np.sum(PSD)
-        spectral_entropy = -np.sum(psd_norm * np.log(psd_norm + 1e-12))
-
+        weighted_mean_freq = np.sum(freq * PSD_norm)
+        freq_peak_power = freq[np.argmax(PSD)]
         power_sum = np.sum(PSD)
     else:
-        spectral_centroid = np.nan
-        spectral_entropy = np.nan
+        weighted_mean_freq = np.nan
+        freq_peak_power = np.nan
         power_sum = np.nan
 
     return {
         "Impact Peak Force (BW)": impact_peak,
         "Time to Impact Peak (ms)": time_to_impact,
-        "Instant Loading Rate (BW·s⁻¹)": inst_rfd,
-        "Avg Loading Rate (BW·s⁻¹)": avg_rfd,
-        "Weighted Mean Frequency (Hz)": spectral_centroid,
-        "Frequency of Peak Signal Power": spectral_entropy,
+        "Vertical Instant Loading Rate (BW·s⁻¹)": inst_rfd,
+        "Vertical Avg Loading Rate (BW·s⁻¹)": avg_rfd,
+        "Weighted Mean Frequency (Hz)": weighted_mean_freq,
+        "Frequency of Peak Signal Power (Hz)": freq_peak_power,
         "Power Sum (norm)": power_sum,
-        "Active Peak Force (BW)": active_peak
+        "Active Peak Force (BW)": active_peak,
+        "Time to Active Peak Force (ms)": time_to_active_peak
     }
 
 
 # =====================================================
-# 7. BUILD DATASET
+# BUILD DATASET
 # =====================================================
 
 rows = []
@@ -173,30 +169,30 @@ stats = pd.DataFrame(rows)
 
 
 # =====================================================
-# 8. MERGE
+# MERGE
 # =====================================================
 
 merged = stats.merge(
     injury_info,
     left_on="Participant",
     right_on="Subject (Initials)",
-    how="inner"
 )
 
 
 # =====================================================
-# 9. ML DATASET
+# ML DATASET (UPDATED FEATURES)
 # =====================================================
 
 feature_cols = [
     "Impact Peak Force (BW)",
     "Time to Impact Peak (ms)",
-    "Instant Loading Rate (BW·s⁻¹)",
-    "Avg Loading Rate (BW·s⁻¹)",
+    "Vertical Instant Loading Rate (BW·s⁻¹)",
+    "Vertical Avg Loading Rate (BW·s⁻¹)",
     "Weighted Mean Frequency (Hz)",
-    "Frequency of Peak Signal Power",
+    "Frequency of Peak Signal Power (Hz)",
     "Power Sum (norm)",
-    "Active Peak Force (BW)"
+    "Active Peak Force (BW)",
+    "Time to Active Peak Force (ms)"
 ]
 
 df = merged.dropna(subset=feature_cols + [injury_col]).copy()
@@ -206,14 +202,14 @@ y = df[injury_col].map({1: 1, 2: 0}).values
 
 
 # =====================================================
-# 10. CV SETUP
+# CV SETUP
 # =====================================================
 
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 
 # =====================================================
-# 11. MODELS
+# MODELS
 # =====================================================
 
 models = {
@@ -244,7 +240,7 @@ models = {
 
 
 # =====================================================
-# 12. CROSS-VALIDATION
+# CROSS-VALIDATION
 # =====================================================
 
 print("\n==============================")
@@ -252,7 +248,6 @@ print("5-FOLD CROSS-VALIDATION RESULTS")
 print("==============================")
 
 for name, model in models.items():
-
     scores = cross_val_score(model, X, y, cv=cv, scoring="accuracy")
 
     print(f"\n{name}")
@@ -261,7 +256,7 @@ for name, model in models.items():
 
 
 # =====================================================
-# 13. FEATURE IMPORTANCE MODELS
+# FEATURE IMPORTANCE
 # =====================================================
 
 log_final = models["Logistic Regression"]
@@ -273,63 +268,64 @@ rf_final.fit(X, y)
 xgb_final = models["XGBoost"]
 xgb_final.fit(X, y)
 
-
 feature_names = feature_cols
 
 
-# ---------------- Logistic Regression ----------------
+# Logistic Regression
 lr_clf = log_final.named_steps["clf"]
+lr_importance = np.abs(lr_clf.coef_[0])
 
-lr_df = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": lr_clf.coef_[0]
-}).sort_values(by="Importance", key=np.abs, ascending=False)
+# Random Forest
+rf_importance = rf_final.feature_importances_
 
-
-# ---------------- Random Forest ----------------
-rf_df = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": rf_final.feature_importances_
-}).sort_values(by="Importance", ascending=False)
-
-
-# ---------------- XGBoost ----------------
-xgb_df = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": xgb_final.feature_importances_
-}).sort_values(by="Importance", ascending=False)
+# XGBoost
+xgb_importance = xgb_final.feature_importances_
 
 
 # =====================================================
-# 14. COMBINED PLOT
+# FEATURE RANKING (NEW)
 # =====================================================
 
-combined_df = pd.DataFrame({
+# Get raw importances
+lr_clf = log_final.named_steps["clf"]
+lr_importance = np.abs(lr_clf.coef_[0])
+
+rf_importance = rf_final.feature_importances_
+xgb_importance = xgb_final.feature_importances_
+
+# Convert to DataFrame
+rank_df = pd.DataFrame({
     "Feature": feature_names,
-    "Logistic Regression": np.abs(lr_df.set_index("Feature").loc[feature_names]["Importance"].values),
-    "Random Forest": rf_df.set_index("Feature").loc[feature_names]["Importance"].values,
-    "XGBoost": xgb_df.set_index("Feature").loc[feature_names]["Importance"].values
+    "Logistic Regression": lr_importance,
+    "Random Forest": rf_importance,
+    "XGBoost": xgb_importance
 })
 
-# normalize for comparison
-combined_df["Logistic Regression"] /= combined_df["Logistic Regression"].max()
-combined_df["Random Forest"] /= combined_df["Random Forest"].max()
-combined_df["XGBoost"] /= combined_df["XGBoost"].max()
+# Rank each model (1 = most important)
+rank_df["LR Rank"] = rank_df["Logistic Regression"].rank(ascending=False, method="min")
+rank_df["RF Rank"] = rank_df["Random Forest"].rank(ascending=False, method="min")
+rank_df["XGB Rank"] = rank_df["XGBoost"].rank(ascending=False, method="min")
 
+# Average rank (lower = better)
+rank_df["Average Rank"] = rank_df[["LR Rank", "RF Rank", "XGB Rank"]].mean(axis=1)
 
-x = np.arange(len(feature_names))
-width = 0.25
+# Sort best → worst
+rank_df = rank_df.sort_values("Average Rank")
 
-plt.figure(figsize=(12, 6))
+# =====================================================
+# PRINT RESULTS (CLEAN FORMAT)
+# =====================================================
 
-plt.barh(x - width, combined_df["Logistic Regression"], height=width, label="Logistic Regression")
-plt.barh(x, combined_df["Random Forest"], height=width, label="Random Forest")
-plt.barh(x + width, combined_df["XGBoost"], height=width, label="XGBoost")
+print("\n==============================")
+print("FEATURE RANKINGS (BEST → WORST)")
+print("==============================\n")
 
-plt.yticks(x, feature_names)
-plt.xlabel("Normalized Importance")
-plt.legend()
-
-plt.gca().invert_yaxis()
-plt.tight_layout()
-plt.show()
+for i, row in rank_df.iterrows():
+    total_rank = int(row["LR Rank"] + row["RF Rank"] + row["XGB Rank"])
+    print(
+        f"{row['Feature']}: "
+        f"LogReg ({int(row['LR Rank'])}/9), "
+        f"RF ({int(row['RF Rank'])}/9), "
+        f"XGB ({int(row['XGB Rank'])}/9) | "
+        f"Average: {total_rank}/27"
+    )
